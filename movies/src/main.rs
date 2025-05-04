@@ -127,3 +127,62 @@ fn build_popularity_map(ratings: &[Rating]) -> HashMap<u32, usize> {
     }
     pop
 }
+
+// Recommend movies for a user using top-k similar users
+// Inputs:
+// - user_id: target user
+// - uvecs: map of user rating vectors
+// - ratings: all ratings
+// - pop: movie popularity map
+// - top_n: number of recommendations
+// Output:
+// - Vec<u32> --> list of top movie IDs
+// Logic:
+// 1. Calculate similarities to other users
+// 2. Pick top-k similar users
+// 3. Aggregate weighted ratings from neighbors
+// 4. Predict scores, sort by score, then popularity, then movie ID
+// 5. Return top-N movie IDs
+fn recommend_movies(
+    user_id: u32,
+    uvecs: &RatingMap,
+    ratings: &[Rating],
+    pop: &HashMap<u32, usize>,
+    top_n: usize,
+) -> Vec<u32> {
+    let mut mids: Vec<u32> = ratings.iter().map(|r| r.movie_id).collect();
+    mids.sort_unstable();
+    mids.dedup();
+    let pos: HashMap<u32, usize> = mids.iter().copied().enumerate().map(|(i, id)| (id, i)).collect();
+    let target = &uvecs[&user_id];
+
+    // Step 1: Calculate similarity to all other users
+    let mut sims: Vec<(u32, f32)> = uvecs.iter()
+        .filter(|(&uid, _)| uid != user_id)
+        .map(|(&uid, vec)| (uid, cosine_similarity(target, vec)))
+        .collect();
+    sims.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    let k = 5;
+
+    // Step 2: Aggregate weighted ratings from top-k similar users
+    let mut scores: HashMap<u32, f32> = HashMap::new();
+    let mut weights: HashMap<u32, f32> = HashMap::new();
+    for &(uid, sim) in sims.iter().take(k) {
+        for r in ratings.iter().filter(|r| r.user_id == uid) {
+            if target[pos[&r.movie_id]] == 0.0 {
+                *scores.entry(r.movie_id).or_default() += sim * r.rating;
+                *weights.entry(r.movie_id).or_default() += sim;
+            }
+        }
+    }
+
+    // Step 3: Compute final predicted scores and sort
+    let mut preds: Vec<(u32, f32)> = scores.into_iter()
+        .filter_map(|(mid, sc)| weights.get(&mid).map(|&w| (mid, sc / w)))
+        .collect();
+    preds.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap()
+        .then_with(|| pop[&b.0].cmp(&pop[&a.0]))
+        .then(a.0.cmp(&b.0)));
+
+    preds.into_iter().take(top_n).map(|(mid, _)| mid).collect()
+}
